@@ -35,7 +35,7 @@ class RAGService:
         
         # Initialize Groq client
         self.groq_client = Groq(api_key=self.groq_api_key)
-        self.model_name = "qwen/qwen3-32b"  # Available models: mixtral-8x7b-32768, llama2-70b-4096
+        self.model_name = "deepseek-r1-distill-llama-70b"  # Available models: mixtral-8x7b-32768, llama2-70b-4096
         
         # Initialize Pinecone
         self.pc = Pinecone(api_key=self.pinecone_api_key)
