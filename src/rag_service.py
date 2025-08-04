@@ -7,12 +7,11 @@ import uuid
 import time
 import numpy as np
 from groq import Groq
-from langchain.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.schema import Document
+import PyPDF2
+from io import BytesIO
+from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
-from pinecone import Pinecone, ServerlessSpec
+from pinecone import Pinecone
 from dotenv import load_dotenv
 
 # Suppress FutureWarnings from transformers/torch
@@ -20,6 +19,43 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", message=".*encoder_attention_mask.*")
 
 load_dotenv()
+
+class Document:
+    """Simple document class to replace LangChain Document"""
+    def __init__(self, page_content: str, metadata: dict = None):
+        self.page_content = page_content
+        self.metadata = metadata or {}
+
+class SimpleTextSplitter:
+    """Simple text splitter to replace LangChain's RecursiveCharacterTextSplitter"""
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+    
+    def split_documents(self, documents: List[Document]) -> List[Document]:
+        """Split documents into smaller chunks"""
+        chunks = []
+        for doc in documents:
+            text_chunks = self._split_text(doc.page_content)
+            for i, chunk in enumerate(text_chunks):
+                chunks.append(Document(
+                    page_content=chunk,
+                    metadata={**doc.metadata, "chunk_id": i}
+                ))
+        return chunks
+    
+    def _split_text(self, text: str) -> List[str]:
+        """Split text into chunks with overlap"""
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + self.chunk_size
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start = end - self.chunk_overlap
+            if start >= len(text):
+                break
+        return chunks
 
 class RAGService:
     def __init__(self):
@@ -37,50 +73,70 @@ class RAGService:
         self.groq_client = Groq(api_key=self.groq_api_key)
         self.model_name = "deepseek-r1-distill-llama-70b"  # Available models: mixtral-8x7b-32768, llama2-70b-4096
         
-        # Initialize Pinecone
-        self.pc = Pinecone(api_key=self.pinecone_api_key)
-        self.index_name = os.getenv("PINECONE_INDEX_NAME", "policy-reader")
-        
-        # Create index if it doesn't exist
-        self._create_index_if_not_exists()
+        # Initialize Pinecone using the new v3 API
+        try:
+            self.pc = Pinecone(api_key=self.pinecone_api_key)
+            self.index_name = os.getenv("PINECONE_INDEX_NAME", "policy-reader")
+            print(f"Pinecone initialized with index name: '{self.index_name}'")
+            
+            # Create index if it doesn't exist
+            self._create_index_if_not_exists()
+        except Exception as e:
+            print(f"Failed to initialize Pinecone: {e}")
+            raise
         
         # Initialize components
-        # Using HuggingFace embeddings as free alternative to OpenAI
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        # Using SentenceTransformer directly instead of LangChain wrapper
+        self.embeddings = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         
-        self.text_splitter = RecursiveCharacterTextSplitter(
+        self.text_splitter = SimpleTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
         )
     
     def _create_index_if_not_exists(self):
-        """Create Pinecone index if it doesn't exist"""
+        """Create Pinecone index if it doesn't exist using v3 API"""
         try:
-            # Get list of existing indexes using the new API
-            existing_indexes = self.pc.list_indexes().names()
+            # Check if index exists using new API
+            print(f"Checking for existing indexes...")
+            active_indexes = [index.name for index in self.pc.list_indexes()]
+            print(f"All active indexes: {active_indexes}")
+            print(f"Looking for index named: '{self.index_name}'")
             
-            if self.index_name not in existing_indexes:
+            if self.index_name not in active_indexes:
+                print(f"Index '{self.index_name}' not found. Creating new index...")
+                
+                # Create index with new v3 API
+                from pinecone import ServerlessSpec
                 self.pc.create_index(
                     name=self.index_name,
-                    dimension=384,  # HuggingFace all-MiniLM-L6-v2 embedding dimension
-                    metric="cosine",  # Best for text similarity (other options: euclidean, dotproduct)
+                    dimension=384,  # for all-MiniLM-L6-v2
+                    metric='cosine',
                     spec=ServerlessSpec(
-                        cloud="aws",  # Options: aws, gcp, azure
-                        region="us-east-1"  # Choose region closest to your users
+                        cloud='aws',
+                        region='us-east-1'
                     )
-                    # Alternative: Pod-based spec for high-volume usage
-                    # spec=PodSpec(
-                    #     environment="us-east1-gcp",
-                    #     pod_type="p1.x1"
-                    # )
                 )
-                print(f"Created Pinecone index '{self.index_name}' with 384 dimensions and cosine metric")
+                
+                print(f"Index '{self.index_name}' created successfully")
                 # Wait for index to be ready
-                time.sleep(10)
+                print("Waiting 15 seconds for index to be ready...")
+                import time
+                time.sleep(15)
+                
+                # Check if index is now ready
+                updated_indexes = [index.name for index in self.pc.list_indexes()]
+                print(f"Updated index list: {updated_indexes}")
             else:
-                print(f"Pinecone index '{self.index_name}' already exists")
+                print(f"Index '{self.index_name}' already exists. Skipping creation.")
+                
+            # Additional check: try to get index details
+            try:
+                index_info = self.pc.describe_index(self.index_name)
+                print(f"Index '{self.index_name}' details: {index_info}")
+            except Exception as e:
+                print(f"Could not get index details: {e}")
+                
         except Exception as e:
             print(f"Warning: Could not create/check Pinecone index: {e}")
             # Continue without creating index - it might already exist
@@ -101,9 +157,8 @@ class RAGService:
             
             print(f"Saved to temporary file: {temp_path}")
             
-            # Load and process the PDF
-            loader = PyPDFLoader(temp_path)
-            documents = loader.load()
+            # Load and process the PDF using PyPDF2
+            documents = self._load_pdf(temp_path)
             print(f"Loaded {len(documents)} pages from PDF")
             
             # Clean up temporary file
@@ -119,21 +174,64 @@ class RAGService:
             print(f"Error in download_and_process_document: {str(e)}")
             raise Exception(f"Error processing document: {str(e)}")
     
+    def _load_pdf(self, file_path: str) -> List[Document]:
+        """Load PDF using PyPDF2"""
+        documents = []
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page_num, page in enumerate(pdf_reader.pages):
+                text = page.extract_text()
+                documents.append(Document(
+                    page_content=text,
+                    metadata={"page": page_num + 1, "source": file_path}
+                ))
+        return documents
+    
     def create_vector_store(self, texts: List[Document]) -> Dict[str, Any]:
-        """Create vector store from document texts using Pinecone directly"""
+        """Create vector store from document texts using Pinecone"""
         try:
             # Create unique namespace for this document
             namespace = f"doc_{str(uuid.uuid4())[:8]}"
             print(f"Creating vector store with namespace: {namespace}")
             
-            # Get the Pinecone index
-            index = self.pc.Index(self.index_name)
-            print(f"Connected to Pinecone index: {self.index_name}")
+            # Get the Pinecone index using new v3 API
+            try:
+                print(f"Attempting to connect to index: '{self.index_name}'")
+                index = self.pc.Index(self.index_name)
+                print(f"Successfully connected to Pinecone index: '{self.index_name}'")
+                
+                # Test the connection by getting index stats
+                print("Testing connection with index stats...")
+                stats = index.describe_index_stats()
+                print(f"Index stats - Total vectors: {stats.get('total_vector_count', 'Unknown')}")
+                print(f"Index dimension: {stats.get('dimension', 'Unknown')}")
+                
+                # Check if index is ready
+                if 'total_vector_count' not in stats:
+                    print("Warning: Index may not be fully ready yet")
+                    
+            except Exception as e:
+                print(f"Failed to connect to index '{self.index_name}': {e}")
+                print(f"Error type: {type(e).__name__}")
+                
+                # List available indexes for debugging
+                try:
+                    available_indexes = [index.name for index in self.pc.list_indexes()]
+                    print(f"Available indexes in your account: {available_indexes}")
+                    
+                    if available_indexes:
+                        print("Suggestion: Check if your index name matches one of the available indexes above")
+                    else:
+                        print("No indexes found in your account. You may need to create one first.")
+                        
+                except Exception as list_error:
+                    print(f"Could not list available indexes: {list_error}")
+                raise
             
             # Generate embeddings for all texts
             print(f"Generating embeddings for {len(texts)} documents...")
             text_contents = [doc.page_content for doc in texts]
-            embeddings = self.embeddings.embed_documents(text_contents)
+            embeddings = self.embeddings.encode(text_contents)
             
             # Prepare vectors for upsert in batches
             batch_size = 100  # Safe batch size for 384-dim vectors
@@ -151,7 +249,7 @@ class RAGService:
                 for i, (text, embedding) in enumerate(zip(batch_texts, batch_embeddings)):
                     batch_vectors.append({
                         "id": f"{namespace}_{batch_start + i}",
-                        "values": embedding,
+                        "values": embedding.tolist(),  # Convert numpy array to list
                         "metadata": {
                             "text": text.page_content,
                             "page": text.metadata.get("page", 0),
@@ -159,9 +257,18 @@ class RAGService:
                         }
                     })
                 
-                # Upsert batch to Pinecone
+                # Upsert batch to Pinecone with retry logic
                 print(f"Upserting batch {batch_start+1}-{batch_end} of {total_vectors}")
-                index.upsert(vectors=batch_vectors, namespace=namespace)
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        index.upsert(vectors=batch_vectors, namespace=namespace)
+                        break  # Success, exit retry loop
+                    except Exception as e:
+                        if attempt == max_retries - 1:  # Last attempt
+                            raise e
+                        print(f"Attempt {attempt + 1} failed, retrying in 5 seconds: {e}")
+                        time.sleep(5)
             
             print(f"Vector store created successfully with {total_vectors} vectors")
             return {
@@ -169,6 +276,7 @@ class RAGService:
                 "namespace": namespace,
                 "embeddings": self.embeddings
             }
+                
         except Exception as e:
             print(f"Error in create_vector_store: {str(e)}")
             import traceback
@@ -179,7 +287,7 @@ class RAGService:
         """Retrieve relevant documents from vector store"""
         try:
             # Generate embedding for query
-            query_embedding = vector_store["embeddings"].embed_query(query)
+            query_embedding = vector_store["embeddings"].encode([query])[0].tolist()  # Convert to list
             
             # Query Pinecone
             results = vector_store["index"].query(
@@ -205,6 +313,35 @@ class RAGService:
             return documents
         except Exception as e:
             print(f"Error retrieving documents: {str(e)}")
+            return []
+    
+    def _retrieve_from_pinecone(self, query_embedding, vector_store: Dict[str, Any], k: int) -> List[Document]:
+        """Retrieve documents from Pinecone"""
+        try:
+            # Query Pinecone
+            results = vector_store["index"].query(
+                vector=query_embedding,
+                top_k=k,
+                namespace=vector_store["namespace"],
+                include_metadata=True
+            )
+            
+            # Convert results to Document objects
+            documents = []
+            for match in results.matches:
+                doc = Document(
+                    page_content=match.metadata["text"],
+                    metadata={
+                        "page": match.metadata.get("page", 0),
+                        "source": match.metadata.get("source", ""),
+                        "score": match.score
+                    }
+                )
+                documents.append(doc)
+            
+            return documents
+        except Exception as e:
+            print(f"Error retrieving from Pinecone: {e}")
             return []
     
     async def process_questions(self, document_url: str, questions: List[str]) -> List[str]:
