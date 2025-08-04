@@ -14,7 +14,8 @@ groq==0.4.1
 google-generativeai==0.3.2
 
 # Vector Database
-pinecone-client==2.2.4
+pinecone==3.0.2
+
 
 # Document Processing
 PyPDF2==3.0.1
