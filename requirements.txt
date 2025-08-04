@@ -21,8 +21,10 @@ PyPDF2==3.0.1
 pypdf==3.17.4
 
 # LangChain Core (minimal needed components)
-langchain==0.0.340
+langchain==0.1.16
 langchain-community==0.0.38
+langsmith>=0.1.0,<0.2.0
+
 langchain-huggingface==0.0.3
 
 # ML/NLP
