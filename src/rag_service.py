@@ -5,6 +5,9 @@ import warnings
 from typing import List, Dict, Any
 import uuid
 import time
+import hashlib
+import sqlite3
+import json
 import numpy as np
 from groq import Groq
 import PyPDF2
@@ -93,6 +96,184 @@ class RAGService:
             chunk_size=1000,
             chunk_overlap=200
         )
+        
+        # Initialize SQLite database for caching
+        self._init_database()
+    
+    def _init_database(self):
+        """Initialize SQLite database for caching PDF processing results"""
+        try:
+            self.db_path = "pdf_cache.db"
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            
+            # Create table for PDF processing cache
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS pdf_cache (
+                    url_hash TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    vector_count INTEGER NOT NULL,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    pdf_hash TEXT,
+                    metadata TEXT
+                )
+            """)
+            
+            # Create index for faster lookups
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_url_hash ON pdf_cache(url_hash)")
+            self.conn.commit()
+            print("SQLite database initialized for PDF caching")
+            
+            # Clean up old entries to keep database size manageable
+            self._cleanup_old_cache_entries(50)  # Keep only 50 most recent entries
+            
+        except Exception as e:
+            print(f"Warning: Could not initialize SQLite database: {e}")
+            self.conn = None
+    
+    def _get_url_hash(self, url: str) -> str:
+        """Generate hash for URL to use as cache key"""
+        return hashlib.md5(url.encode()).hexdigest()
+    
+    def _get_cached_namespace(self, document_url: str) -> str:
+        """Check if we have already processed this URL and return namespace"""
+        if not self.conn:
+            return None
+            
+        try:
+            url_hash = self._get_url_hash(document_url)
+            cursor = self.conn.execute(
+                "SELECT namespace, vector_count FROM pdf_cache WHERE url_hash = ?",
+                (url_hash,)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                namespace, vector_count = result
+                print(f"Found cached processing for URL: namespace={namespace}, vectors={vector_count}")
+                
+                # Verify the namespace still exists in Pinecone
+                try:
+                    index = self.pc.Index(self.index_name)
+                    stats = index.describe_index_stats()
+                    namespaces = stats.get('namespaces', {})
+                    
+                    if namespace in namespaces and namespaces[namespace]['vector_count'] > 0:
+                        print(f"Verified namespace '{namespace}' exists in Pinecone with {namespaces[namespace]['vector_count']} vectors")
+                        return namespace
+                    else:
+                        print(f"Namespace '{namespace}' not found in Pinecone, will reprocess")
+                        # Remove stale cache entry
+                        self.conn.execute("DELETE FROM pdf_cache WHERE url_hash = ?", (url_hash,))
+                        self.conn.commit()
+                        
+                except Exception as e:
+                    print(f"Error verifying namespace in Pinecone: {e}")
+                    
+            return None
+            
+        except Exception as e:
+            print(f"Error checking cache: {e}")
+            return None
+    
+    def _cache_processing_result(self, document_url: str, namespace: str, vector_count: int):
+        """Cache the processing result for future use"""
+        if not self.conn:
+            return
+            
+        try:
+            url_hash = self._get_url_hash(document_url)
+            
+            # Insert or replace cache entry
+            self.conn.execute("""
+                INSERT OR REPLACE INTO pdf_cache 
+                (url_hash, url, namespace, vector_count, pdf_hash, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (url_hash, document_url, namespace, vector_count, url_hash, 
+                  json.dumps({"processed_at": time.time()})))
+            
+            self.conn.commit()
+            print(f"Cached processing result: URL={document_url[:50]}..., namespace={namespace}, vectors={vector_count}")
+            
+        except Exception as e:
+            print(f"Error caching result: {e}")
+    
+    def _cleanup_old_cache_entries(self, max_entries: int = 100):
+        """Clean up old cache entries to prevent database from growing too large"""
+        if not self.conn:
+            return
+            
+        try:
+            # Keep only the most recent entries
+            self.conn.execute("""
+                DELETE FROM pdf_cache 
+                WHERE url_hash NOT IN (
+                    SELECT url_hash FROM pdf_cache 
+                    ORDER BY processed_at DESC 
+                    LIMIT ?
+                )
+            """, (max_entries,))
+            
+            deleted_count = self.conn.total_changes
+            if deleted_count > 0:
+                self.conn.commit()
+                print(f"Cleaned up {deleted_count} old cache entries")
+                
+        except Exception as e:
+            print(f"Error cleaning up cache: {e}")
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get statistics about the cache database"""
+        if not self.conn:
+            return {"status": "Database not available"}
+            
+        try:
+            cursor = self.conn.execute("SELECT COUNT(*) FROM pdf_cache")
+            total_entries = cursor.fetchone()[0]
+            
+            cursor = self.conn.execute("""
+                SELECT COUNT(*) FROM pdf_cache 
+                WHERE processed_at > datetime('now', '-24 hours')
+            """)
+            recent_entries = cursor.fetchone()[0]
+            
+            return {
+                "total_cached_documents": total_entries,
+                "processed_last_24h": recent_entries,
+                "database_path": self.db_path
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def _download_pdf_to_memory(self, document_url: str) -> bytes:
+        """Download PDF directly to memory without using temp files"""
+        try:
+            print(f"Downloading PDF from: {document_url}")
+            response = requests.get(document_url, timeout=30)
+            response.raise_for_status()
+            print(f"Downloaded {len(response.content)} bytes")
+            return response.content
+        except Exception as e:
+            raise Exception(f"Error downloading PDF: {str(e)}")
+    
+    def _load_pdf_from_memory(self, pdf_content: bytes) -> List[Document]:
+        """Load PDF from memory bytes using PyPDF2"""
+        try:
+            documents = []
+            # Convert bytes to BytesIO for PyPDF2
+            pdf_file = BytesIO(pdf_content)
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            
+            for page_num, page in enumerate(pdf_reader.pages):
+                text = page.extract_text()
+                if text.strip():  # Only add pages with content
+                    documents.append(Document(
+                        page_content=text,
+                        metadata={"page": page_num + 1, "source": "pdf_download"}
+                    ))
+            return documents
+        except Exception as e:
+            raise Exception(f"Error loading PDF from memory: {str(e)}")
     
     def _create_index_if_not_exists(self):
         """Create Pinecone index if it doesn't exist using v3 API"""
@@ -141,41 +322,37 @@ class RAGService:
             print(f"Warning: Could not create/check Pinecone index: {e}")
             # Continue without creating index - it might already exist
         
-    def download_and_process_document(self, document_url: str) -> List:
-        """Download PDF from URL and process it"""
+    def download_and_process_document(self, document_url: str) -> tuple[List[Document], str]:
+        """Download PDF from URL and process it with caching support"""
         try:
-            print(f"Downloading document from: {document_url}")
-            # Download the PDF
-            response = requests.get(document_url)
-            response.raise_for_status()
-            print(f"Downloaded {len(response.content)} bytes")
+            # Check if we have already processed this URL
+            cached_namespace = self._get_cached_namespace(document_url)
+            if cached_namespace:
+                print(f"Using cached processing result for this URL")
+                # Return empty list for texts since we'll use cached vectors
+                return [], cached_namespace
             
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-                temp_file.write(response.content)
-                temp_path = temp_file.name
+            print(f"Processing new document from: {document_url}")
             
-            print(f"Saved to temporary file: {temp_path}")
+            # Download PDF to memory (no temp files)
+            pdf_content = self._download_pdf_to_memory(document_url)
             
-            # Load and process the PDF using PyPDF2
-            documents = self._load_pdf(temp_path)
+            # Load and process the PDF from memory
+            documents = self._load_pdf_from_memory(pdf_content)
             print(f"Loaded {len(documents)} pages from PDF")
-            
-            # Clean up temporary file
-            os.unlink(temp_path)
             
             # Split documents into chunks
             texts = self.text_splitter.split_documents(documents)
             print(f"Split into {len(texts)} text chunks")
             
-            return texts
+            return texts, None  # None indicates this is new processing
             
         except Exception as e:
             print(f"Error in download_and_process_document: {str(e)}")
             raise Exception(f"Error processing document: {str(e)}")
     
     def _load_pdf(self, file_path: str) -> List[Document]:
-        """Load PDF using PyPDF2"""
+        """Load PDF using PyPDF2 from file path"""
         documents = []
         with open(file_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
@@ -187,12 +364,22 @@ class RAGService:
                 ))
         return documents
     
-    def create_vector_store(self, texts: List[Document]) -> Dict[str, Any]:
-        """Create vector store from document texts using Pinecone"""
+    def create_vector_store(self, texts: List[Document], cached_namespace: str = None, document_url: str = None) -> Dict[str, Any]:
+        """Create vector store from document texts using Pinecone with caching support"""
         try:
+            # If we have a cached namespace, use it
+            if cached_namespace:
+                print(f"Using cached vector store with namespace: {cached_namespace}")
+                index = self.pc.Index(self.index_name)
+                return {
+                    "index": index,
+                    "namespace": cached_namespace,
+                    "embeddings": self.embeddings
+                }
+            
             # Create unique namespace for this document
             namespace = f"doc_{str(uuid.uuid4())[:8]}"
-            print(f"Creating vector store with namespace: {namespace}")
+            print(f"Creating new vector store with namespace: {namespace}")
             
             # Get the Pinecone index using new v3 API
             try:
@@ -271,6 +458,11 @@ class RAGService:
                         time.sleep(5)
             
             print(f"Vector store created successfully with {total_vectors} vectors")
+            
+            # Cache the result if we have a document URL
+            if document_url:
+                self._cache_processing_result(document_url, namespace, total_vectors)
+            
             return {
                 "index": index,
                 "namespace": namespace,
@@ -349,10 +541,17 @@ class RAGService:
         try:
             print(f"Processing {len(questions)} questions")
 
-            # Step 1: Document processing
-            texts = self.download_and_process_document(document_url)
-            vector_store = self.create_vector_store(texts)
-            print(f"Vector store ready for querying")
+            # Step 1: Document processing with caching
+            texts, cached_namespace = self.download_and_process_document(document_url)
+            
+            if cached_namespace:
+                # Use cached vectors
+                vector_store = self.create_vector_store([], cached_namespace, document_url)
+                print(f"Using cached vector store for querying")
+            else:
+                # Process new document
+                vector_store = self.create_vector_store(texts, None, document_url)
+                print(f"Created new vector store for querying")
 
             final_answers = []
 

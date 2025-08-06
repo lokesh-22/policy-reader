@@ -49,6 +49,15 @@ rag_service = RAGService()
 async def root():
     return {"message": "Policy Reader RAG API", "version": "1.0.0"}
 
+@app.get("/cache/stats")
+async def get_cache_stats(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Get cache statistics"""
+    try:
+        stats = rag_service.get_cache_stats()
+        return {"success": True, "cache_stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting cache stats: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
