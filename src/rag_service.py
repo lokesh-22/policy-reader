@@ -14,7 +14,7 @@ import PyPDF2
 from io import BytesIO
 from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 from dotenv import load_dotenv
 
 # Suppress FutureWarnings from transformers/torch
