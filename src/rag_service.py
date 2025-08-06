@@ -14,7 +14,8 @@ import PyPDF2
 from io import BytesIO
 from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
-from pinecone import Pinecone, ServerlessSpec
+import pinecone
+from pinecone import Pinecone
 from dotenv import load_dotenv
 
 # Suppress FutureWarnings from transformers/torch
@@ -287,17 +288,27 @@ class RAGService:
             if self.index_name not in active_indexes:
                 print(f"Index '{self.index_name}' not found. Creating new index...")
                 
-                # Create index with new v3 API
-                from pinecone import ServerlessSpec
-                self.pc.create_index(
-                    name=self.index_name,
-                    dimension=768,  # for all-mpnet-base-v2
-                    metric='cosine',
-                    spec=ServerlessSpec(
+                # Create index with v2.2.x API
+                try:
+                    from pinecone import ServerlessSpec
+                    self.pc.create_index(
+                        name=self.index_name,
+                        dimension=768,  # for all-mpnet-base-v2
+                        metric='cosine',
+                        spec=ServerlessSpec(
+                            cloud='aws',
+                            region='us-east-1'
+                        )
+                    )
+                except ImportError:
+                    # Fallback for older pinecone versions
+                    self.pc.create_index(
+                        name=self.index_name,
+                        dimension=768,
+                        metric='cosine',
                         cloud='aws',
                         region='us-east-1'
                     )
-                )
                 
                 print(f"Index '{self.index_name}' created successfully")
                 # Wait for index to be ready
