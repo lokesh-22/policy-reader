@@ -2,7 +2,7 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
-pydantic==2.5.0
+pydantic==2.4.2
 
 # HTTP and Utilities
 httpx==0.25.2
@@ -19,10 +19,16 @@ pinecone-client==3.0.3
 # Document Processing
 PyPDF2==3.0.1
 
-# ML/Embeddings (using latest compatible versions)
-sentence-transformers==2.3.1
-torch==2.2.2
-transformers==4.39.3
-numpy==1.26.4
+# ML/Embeddings - Compatible versions for fresh install
+torch>=2.0.0,<2.5.0
+transformers>=4.30.0,<4.45.0
+sentence-transformers>=2.2.0,<3.0.0
+numpy>=1.24.0,<2.0.0
+tokenizers>=0.13.0,<0.20.0
+huggingface-hub>=0.16.0,<0.25.0
+
+# Additional ML dependencies
+scikit-learn>=1.3.0
+scipy>=1.10.0
 
 # Note: SQLite and hashlib are part of Python standard library

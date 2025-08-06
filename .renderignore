@@ -1,0 +1,39 @@
+# Render ignore file - exclude these from deployment
+
+# Development files
+test_deployment.py
+test_api.py
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# Local development
+.env
+.venv/
+venv/
+env/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation (optional - include if you want docs in deployment)
+# README.md
+# DEPLOYMENT.md
+
+# Local cache/data (will be recreated)
+pdf_cache.db
+chroma_db/
+
+# Assets (these might be needed, comment out if required)
+# assets/

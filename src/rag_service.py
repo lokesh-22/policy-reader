@@ -90,7 +90,7 @@ class RAGService:
         
         # Initialize components
         # Using SentenceTransformer directly instead of LangChain wrapper
-        self.embeddings = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        self.embeddings = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
         
         self.text_splitter = SimpleTextSplitter(
             chunk_size=1000,
@@ -291,7 +291,7 @@ class RAGService:
                 from pinecone import ServerlessSpec
                 self.pc.create_index(
                     name=self.index_name,
-                    dimension=384,  # for all-MiniLM-L6-v2
+                    dimension=768,  # for all-mpnet-base-v2
                     metric='cosine',
                     spec=ServerlessSpec(
                         cloud='aws',
@@ -606,7 +606,7 @@ class RAGService:
                         messages=[{"role": "user", "content": qwen_prompt}],
                         model=self.model_name,
                         temperature=0,
-                        max_tokens=100,
+                        max_tokens=512,
                     )
                     qwen_answer = chat_completion.choices[0].message.content.strip()
                     print(f"Qwen Answer: {qwen_answer}")
