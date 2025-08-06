@@ -15,7 +15,6 @@ from io import BytesIO
 from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
 import pinecone
-from pinecone import Pinecone
 from dotenv import load_dotenv
 
 # Suppress FutureWarnings from transformers/torch
@@ -77,9 +76,11 @@ class RAGService:
         self.groq_client = Groq(api_key=self.groq_api_key)
         self.model_name = "deepseek-r1-distill-llama-70b"  # Available models: mixtral-8x7b-32768, llama2-70b-4096
         
-        # Initialize Pinecone using the new v3 API
+        # Initialize Pinecone using the v2.2.x API
         try:
-            self.pc = Pinecone(api_key=self.pinecone_api_key)
+            # For pinecone 2.2.x, we need environment parameter
+            pinecone_env = os.getenv("PINECONE_ENVIRONMENT", "us-east-1-aws")
+            pinecone.init(api_key=self.pinecone_api_key, environment=pinecone_env)
             self.index_name = os.getenv("PINECONE_INDEX_NAME", "policy-reader")
             print(f"Pinecone initialized with index name: '{self.index_name}'")
             
@@ -155,7 +156,7 @@ class RAGService:
                 
                 # Verify the namespace still exists in Pinecone
                 try:
-                    index = self.pc.Index(self.index_name)
+                    index = pinecone.Index(self.index_name)
                     stats = index.describe_index_stats()
                     namespaces = stats.get('namespaces', {})
                     
@@ -277,11 +278,11 @@ class RAGService:
             raise Exception(f"Error loading PDF from memory: {str(e)}")
     
     def _create_index_if_not_exists(self):
-        """Create Pinecone index if it doesn't exist using v3 API"""
+        """Create Pinecone index if it doesn't exist using v2.2.x API"""
         try:
-            # Check if index exists using new API
+            # Check if index exists using v2.2.x API
             print(f"Checking for existing indexes...")
-            active_indexes = [index.name for index in self.pc.list_indexes()]
+            active_indexes = pinecone.list_indexes()
             print(f"All active indexes: {active_indexes}")
             print(f"Looking for index named: '{self.index_name}'")
             
@@ -289,42 +290,27 @@ class RAGService:
                 print(f"Index '{self.index_name}' not found. Creating new index...")
                 
                 # Create index with v2.2.x API
-                try:
-                    from pinecone import ServerlessSpec
-                    self.pc.create_index(
-                        name=self.index_name,
-                        dimension=768,  # for all-mpnet-base-v2
-                        metric='cosine',
-                        spec=ServerlessSpec(
-                            cloud='aws',
-                            region='us-east-1'
-                        )
-                    )
-                except ImportError:
-                    # Fallback for older pinecone versions
-                    self.pc.create_index(
-                        name=self.index_name,
-                        dimension=768,
-                        metric='cosine',
-                        cloud='aws',
-                        region='us-east-1'
-                    )
+                pinecone.create_index(
+                    name=self.index_name,
+                    dimension=768,  # for all-mpnet-base-v2
+                    metric='cosine'
+                )
                 
                 print(f"Index '{self.index_name}' created successfully")
                 # Wait for index to be ready
-                print("Waiting 15 seconds for index to be ready...")
+                print("Waiting 60 seconds for index to be ready...")
                 import time
-                time.sleep(15)
+                time.sleep(60)
                 
                 # Check if index is now ready
-                updated_indexes = [index.name for index in self.pc.list_indexes()]
+                updated_indexes = pinecone.list_indexes()
                 print(f"Updated index list: {updated_indexes}")
             else:
                 print(f"Index '{self.index_name}' already exists. Skipping creation.")
                 
             # Additional check: try to get index details
             try:
-                index_info = self.pc.describe_index(self.index_name)
+                index_info = pinecone.describe_index(self.index_name)
                 print(f"Index '{self.index_name}' details: {index_info}")
             except Exception as e:
                 print(f"Could not get index details: {e}")
@@ -381,7 +367,7 @@ class RAGService:
             # If we have a cached namespace, use it
             if cached_namespace:
                 print(f"Using cached vector store with namespace: {cached_namespace}")
-                index = self.pc.Index(self.index_name)
+                index = pinecone.Index(self.index_name)
                 return {
                     "index": index,
                     "namespace": cached_namespace,
@@ -395,7 +381,7 @@ class RAGService:
             # Get the Pinecone index using new v3 API
             try:
                 print(f"Attempting to connect to index: '{self.index_name}'")
-                index = self.pc.Index(self.index_name)
+                index = pinecone.Index(self.index_name)
                 print(f"Successfully connected to Pinecone index: '{self.index_name}'")
                 
                 # Test the connection by getting index stats
@@ -414,7 +400,7 @@ class RAGService:
                 
                 # List available indexes for debugging
                 try:
-                    available_indexes = [index.name for index in self.pc.list_indexes()]
+                    available_indexes = pinecone.list_indexes()
                     print(f"Available indexes in your account: {available_indexes}")
                     
                     if available_indexes:

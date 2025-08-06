@@ -18,6 +18,8 @@ services:
         sync: false
       - key: PINECONE_INDEX_NAME
         value: policy-reader
+      - key: PINECONE_ENVIRONMENT
+        value: us-east-1-aws
       - key: GEMINI_API_KEY
         sync: false
       - key: PYTHONUNBUFFERED
